@@ -1,0 +1,15 @@
+8=FIX.4.4
+9=709
+35=R
+34=4
+49=TARGET
+56=ME
+11=myClOrdID
+131=myQuoteReqID
+146=myNoRelatedSym
+55=mySymbol          // field missing
+167=mySecurityType   // field missing
+262=MDReqID
+264=MarketDepth
+267=NoMDEntryTypes
+269=MDEntryType
