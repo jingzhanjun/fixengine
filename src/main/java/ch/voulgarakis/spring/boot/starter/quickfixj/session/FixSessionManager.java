@@ -25,8 +25,8 @@ import ch.voulgarakis.spring.boot.starter.quickfixj.exception.SessionDroppedExce
 import ch.voulgarakis.spring.boot.starter.quickfixj.flux.ReactiveFixSession;
 import ch.voulgarakis.spring.boot.starter.quickfixj.session.logging.LoggingContext;
 import ch.voulgarakis.spring.boot.starter.quickfixj.session.logging.LoggingId;
-import ch.voulgarakis.spring.boot.starter.quickfixj.session.utils.FixMessageUtils;
 import ch.voulgarakis.spring.boot.starter.quickfixj.session.utils.StartupLatch;
+import com.pactera.tools.FixMessageUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -39,18 +39,16 @@ import quickfix.RejectLogon;
 import quickfix.SessionID;
 import quickfix.field.Currency;
 import quickfix.field.*;
-import quickfix.fix50sp1.ExecutionReport;
-import quickfix.fix50sp1.MarketDataIncrementalRefresh;
-import quickfix.fix50sp1.MarketDataRequestReject;
-import quickfix.fix50sp1.MarketDataSnapshotFullRefresh;
+import quickfix.fix50sp1.*;
 import reactor.core.publisher.Flux;
 
 import java.text.SimpleDateFormat;
 import java.time.Duration;
+import java.time.Instant;
 import java.time.LocalDateTime;
 import java.util.*;
 
-import static ch.voulgarakis.spring.boot.starter.quickfixj.session.utils.FixMessageUtils.isMessageOfType;
+import static com.pactera.tools.FixMessageUtils.isMessageOfType;
 
 @Component
 public class FixSessionManager implements Application {
@@ -204,6 +202,7 @@ public class FixSessionManager implements Application {
                         LOG.info("Received a MarketDataRequest {}", message);
                         saveMarketDataRequest(message);
                         executePriceStream(message,sessionId);
+                        accessNum++;
                     }else{
                         LOG.error("one day per one access");
                     }
@@ -218,46 +217,115 @@ public class FixSessionManager implements Application {
                 saveNewOrderSingle(message);
                 executeNewOrderSingle(message);
             }
+            if(FixMessageUtils.isMessageOfType(message, MsgType.QUOTE_REQUEST)){
+                LOG.info("Received a QuoteRequest {}", message);
+                saveQuoteRequest(message);
+                executeQuoteRequest(message);
+            }
         } catch (Exception e) {
             logger(sessionId).error("Failed to process FIX message: {}", message, e);
             throw e;
-        }finally {
-            accessNum++;
-//            list.clear();
-//            list_.clear();
         }
+    }
+
+    private void executeQuoteRequest(Message message) {
+        Random random=new Random();
+        String Symbol = FixMessageUtils.safeGetField(message, new Symbol()).orElse("");
+        String QuoteReqID = FixMessageUtils.safeGetField(message, new QuoteReqID()).orElse("");
+        Character Side = FixMessageUtils.safeGetField(message, new Side()).orElse('Z');
+        Double OptPayAmount = FixMessageUtils.safeGetField(message, new OptPayAmount()).orElse(null);
+        if(random.nextInt(2)==1){
+            Message quote=new Quote();
+            quote.setField(new QuoteReqID(QuoteReqID));
+            quote.setField(new QuoteID(UUID.randomUUID().toString()));
+            quote.setField(new OptPayAmount(OptPayAmount));
+            quote.setField(new OrderQty(Double.valueOf("500.55")));
+            quote.setField(new Symbol(Symbol));
+            quote.setField(new Side(Side));
+            quote.setField(new Currency("RMB"));
+            quote.setField(new BidPx(Double.valueOf("100.25")));
+            quote.setField(new BidSize(Double.valueOf("500.55")));
+            quote.setField(new OfferPx (Double.valueOf("100.33")));
+            quote.setField(new OfferSize(Double.valueOf("450")));
+            quote.setField(new MinQty(Double.valueOf("100")));
+            quote.setField(new MidPx(Double.valueOf("100.3")));
+            LOG.info("Sending Quote {}",quote);
+            fixSession.send(()->quote).subscribe();
+        }else{
+            QuoteRequestReject qrr=new QuoteRequestReject();
+            QuoteRequestReject.NoRelatedSym sym=new QuoteRequestReject.NoRelatedSym();
+            sym.setField(new Symbol(Symbol));
+            qrr.addGroup(sym);
+            qrr.setField(new QuoteReqID(FixMessageUtils.safeGetField(message, new QuoteReqID()).orElse("")));
+            qrr.setField(new QuoteRequestRejectReason(1));
+            LOG.info("Sending QuoteRequestReject {}",qrr);
+            fixSession.send(()->qrr).subscribe();
+        }
+    }
+
+    private void saveQuoteRequest(Message message) {
+        Map<String,Object> indexMap=new HashMap<>();
+        indexMap.put("MsgType","R");
+        String QuoteReqID = FixMessageUtils.safeGetField(message, new QuoteReqID()).orElse("no_request");
+        String ClOrdID = FixMessageUtils.safeGetField(message, new ClOrdID()).orElse("no_request");
+        Character Side = FixMessageUtils.safeGetField(message, new Side()).orElse('Z');
+        Integer QuoteType = FixMessageUtils.safeGetField(message, new QuoteType()).orElse(1);
+        Character OrdType  = FixMessageUtils.safeGetField(message, new OrdType()).orElse('Z');
+        String Symbol = FixMessageUtils.safeGetField(message, new Symbol()).orElse(null);
+        Double OptPayAmount = FixMessageUtils.safeGetField(message, new OptPayAmount()).orElse(null);
+        Double OrderQty = FixMessageUtils.safeGetField(message, new OrderQty()).orElse(null);
+        Instant TransactTime = FixMessageUtils.safeGetField(message, new TransactTime()).orElse(null);
+        indexMap.put("QuoteReqID", QuoteReqID);
+        indexMap.put("ClOrdID", ClOrdID);
+        indexMap.put("Side", Side);
+        indexMap.put("Symbol", Symbol);
+        indexMap.put("QuoteType", QuoteType);
+        indexMap.put("OrdType", OrdType);
+        indexMap.put("OptPayAmount", OptPayAmount);
+        indexMap.put("TransactTime", TransactTime);
+//        esClient.addById(FIXConstants.TRADE_HUB_NEW_ORDER_SINGLE, ClOrdID, indexMap);
     }
 
     private void saveNewOrderSingle(Message message) {
         Map<String,Object> indexMap=new HashMap<>();
         indexMap.put("MsgType","D");
         String ClOrdID = FixMessageUtils.safeGetField(message, new ClOrdID()).orElse("no_request");
+        String Symbol = FixMessageUtils.safeGetField(message, new Symbol()).orElse("no_request");
+        Double OptPayAmount = FixMessageUtils.safeGetField(message, new OptPayAmount()).orElse(Double.valueOf("100.25"));
+        Character Side = FixMessageUtils.safeGetField(message, new Side()).orElse('Z');
+        Instant TransactTime = FixMessageUtils.safeGetField(message, new TransactTime()).orElse(null);
+        Character OrdType = FixMessageUtils.safeGetField(message, new OrdType()).orElse('Z');
         indexMap.put("ClOrdID", ClOrdID);
-        indexMap.put("Side",FixMessageUtils.safeGetField(message, new Side()).orElse('Z'));
-        indexMap.put("TransactTime",FixMessageUtils.safeGetField(message, new TransactTime()).orElse(null));
-        indexMap.put("OrdType",FixMessageUtils.safeGetField(message, new OrdType()).orElse('Z'));
+        indexMap.put("OrdType", OrdType);
+        indexMap.put("Side", Side);
+        indexMap.put("Symbol", Symbol);
+        indexMap.put("OptPayAmount", OptPayAmount);
+        indexMap.put("TransactTime", TransactTime);
 //        esClient.addById(FIXConstants.TRADE_HUB_NEW_ORDER_SINGLE, ClOrdID, indexMap);
     }
 
     private void executeNewOrderSingle(Message message) {
         Message er=new ExecutionReport();
         //required
+        er.setField(new ExecID("exec_accept_001"));
+        er.setField(new ExecType('G'));
+        er.setField(new OrdStatus('D'));
         er.setField(new ClOrdID(FixMessageUtils.safeGetField(message, new ClOrdID()).orElse("none")));
         er.setField(new OrderID(FixMessageUtils.safeGetField(message, new OrderID()).orElse("none")));
-        er.setField(new ExecID("exec_accept_001"));
-        er.setField(new ExecType(FixMessageUtils.safeGetField(message, new ExecType()).orElse('0')));
-        er.setField(new OrdStatus(FixMessageUtils.safeGetField(message, new OrdStatus()).orElse('0')));
+        er.setField(new Symbol(FixMessageUtils.safeGetField(message, new Symbol()).orElse("none")));
         er.setField(new Side(FixMessageUtils.safeGetField(message, new Side()).orElse('1')));
-        er.setField(new LeavesQty(Double.valueOf("200.0")));
-        er.setField(new CumQty(Double.valueOf("100.0")));
+        er.setField(new CumQty(FixMessageUtils.safeGetField(message, new CumQty()).orElse(0.0)));
+        er.setField(new LeavesQty(1000));
         //check type
-        er.setField(new ExecRestatementReason(FixMessageUtils.safeGetField(message, new ExecRestatementReason()).orElse(1)));
         er.setField(new Price(Double.valueOf("20.02")));
         er.setField(new StopPx(Double.valueOf("25.02")));
-        er.setField(new LastParPx(Double.valueOf("25.50")));
+        er.setField(new AvgPx(Double.valueOf("22.02")));
+        er.setField(new MinQty(Double.valueOf("100")));
         er.setField(new ExpireDate("2021-09-06 12:12:12"));
-        er.setField(new LastQty(Double.valueOf("200.00")));
-        fixSession_2.send(()->er).subscribe();
+        er.setField(new TradeDate(FixMessageUtils.safeGetField(message, new TradeDate()).orElse(null)));
+        er.setField(new OptPayAmount(FixMessageUtils.safeGetField(message, new OptPayAmount()).orElse(0.0)));
+        LOG.info("Sending ExecutionReport {}",er);
+        fixSession.send(()->er).subscribe();
     }
     
     private void saveMarketDataRequest(Message message) {
@@ -316,14 +384,15 @@ public class FixSessionManager implements Application {
                     List<Map<String,Object>> ml=new ArrayList<>();
                     for(int j=1;j<2;j++){
                         Map<String,Object> priceMap=new HashMap<>();
+                        priceMap.put("MDEntryType",'1');
                         priceMap.put("EntryPx",Double.valueOf(j+0.1));
                         priceMap.put("MinQty",Double.valueOf(j+0.1));
                         priceMap.put("Currency",s.split("[/]")[0]);
                         ml.add(priceMap);
                     }
                     for (Map<String,Object> m : ml) {
+                        datas.setField(new MDEntryType((Character) m.get("MDEntryType")));
                         datas.setField(new Symbol(s));
-                        datas.setField(new MDUpdateAction('1'));
                         datas.setField(new MDEntryPx((Double)m.get("EntryPx")));
                         datas.setField(new Currency((String) m.get("Currency")));
                         datas.setField(new MinQty((Double) m.get("MinQty")));

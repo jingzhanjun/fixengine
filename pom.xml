@@ -11,7 +11,7 @@
     <modelVersion>4.0.0</modelVersion>
     <artifactId>fixengine</artifactId>
     <groupId>com.pactera</groupId>
-    <version>0.0.1-SNAPSHOT</version>
+    <version>0.0.2-SNAPSHOT</version>
     <name>fixengine</name>
     <description>ETrade project for Spring Boot</description>
     <properties>
