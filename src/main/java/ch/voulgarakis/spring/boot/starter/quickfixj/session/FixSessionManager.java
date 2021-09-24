@@ -31,6 +31,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import quickfix.Application;
 import quickfix.Message;
@@ -40,11 +41,13 @@ import quickfix.field.Currency;
 import quickfix.field.*;
 import quickfix.fix50sp1.ExecutionReport;
 import quickfix.fix50sp1.MarketDataIncrementalRefresh;
+import quickfix.fix50sp1.MarketDataRequestReject;
 import quickfix.fix50sp1.MarketDataSnapshotFullRefresh;
 import reactor.core.publisher.Flux;
 
 import java.text.SimpleDateFormat;
 import java.time.Duration;
+import java.time.LocalDateTime;
 import java.util.*;
 
 import static ch.voulgarakis.spring.boot.starter.quickfixj.session.utils.FixMessageUtils.isMessageOfType;
@@ -59,14 +62,20 @@ public class FixSessionManager implements Application {
     private final LoggingId loggingId;
     private final AuthenticationService authenticationService;
     private static int accessNum=1;
-    
-    @Autowired 
+    private static List<MarketDataSnapshotFullRefresh> list=Collections.synchronizedList(new ArrayList<>());
+    private static List<MarketDataIncrementalRefresh> list_=Collections.synchronizedList(new ArrayList<>());
+
+
+    @Value("${quickfixj.currency}")
+    private String currency;
+//    @Autowired private EsClient esClient;
+//    @Autowired private RedisClient redisClient;
+    @Autowired
     @Qualifier("TRADING")
     private ReactiveFixSession fixSession;
     @Autowired
     @Qualifier("TRADING_2")
     private ReactiveFixSession fixSession_2;
-//    @Autowired private EsClient esClient;
 //    @Autowired private DatabaseClient databaseClient;
 
     public FixSessionManager(Map<SessionID, ? extends AbstractFixSession> sessions,
@@ -189,7 +198,16 @@ public class FixSessionManager implements Application {
     public void fromApp(Message message, SessionID sessionId) {
         try (LoggingContext ignore = loggingId.loggingCtx(sessionId)) {
             if(FixMessageUtils.isMessageOfType(message, MsgType.MARKET_DATA_REQUEST)){
-                if(accessNum==1){
+                Character SubcriptionRequestType = FixMessageUtils.safeGetField(message, new SubscriptionRequestType()).orElse('Z');
+                if(SubcriptionRequestType.equals('1')){
+                    if(accessNum==1){
+                        LOG.info("Received a MarketDataRequest {}", message);
+                        saveMarketDataRequest(message);
+                        executePriceStream(message,sessionId);
+                    }else{
+                        LOG.error("one day per one access");
+                    }
+                }else{
                     LOG.info("Received a MarketDataRequest {}", message);
                     saveMarketDataRequest(message);
                     executePriceStream(message,sessionId);
@@ -205,6 +223,8 @@ public class FixSessionManager implements Application {
             throw e;
         }finally {
             accessNum++;
+//            list.clear();
+//            list_.clear();
         }
     }
 
@@ -249,6 +269,7 @@ public class FixSessionManager implements Application {
         indexMap.put("MsgType",MsgType);
         indexMap.put("MDReqID", MDReqID);
         indexMap.put("SubscriptionRequestType", SubcriptionRequestType);
+        indexMap.put("createDate", new Date());
         //2.save in database
 //        databaseClient.insert().into("marketdatarequest")
 //                .value("MsgType",MsgType)
@@ -269,70 +290,82 @@ public class FixSessionManager implements Application {
     }
     
     private void executePriceStream(Message message, SessionID sessionId) {
+        List<String> symbols=new ArrayList<>();
+        String[] currencyArray=currency.split("[,]");
+        for(int i=0;i<3;i++){
+            String c_=null;
+            for(String c:currencyArray){
+                if(c.equals(currencyArray[i])){
+                    continue;
+                }else{
+                    c_=c;
+                }
+            }
+            symbols.add(currencyArray[i]+"/"+c_);
+        }
+        //validate request date: fix one day per request
         SimpleDateFormat sdf=new SimpleDateFormat("yyyyMMdd");
         String MDReqID = FixMessageUtils.safeGetField(message, new MDReqID()).orElse("no-quote-request-found");
         Character SubscriptionRequestType = FixMessageUtils.safeGetField(message, new SubscriptionRequestType()).orElse('2');
         try {
-			if(SubscriptionRequestType.equals('0')){
-			    String[] symbols=new String[]{"USD/CNY","GMD/CNY","GRD/CNY"};
-			    List<MarketDataSnapshotFullRefresh> list=new ArrayList<>();
-			    for(String s:symbols){
-			        MarketDataSnapshotFullRefresh mdsf=new MarketDataSnapshotFullRefresh();
-			        MarketDataSnapshotFullRefresh.NoMDEntries datas=new MarketDataSnapshotFullRefresh.NoMDEntries();
-			        mdsf.setField(new MDReqID(MDReqID));
-			        mdsf.setField(new Symbol(s));
-			        List<Map<String,Object>> ml=new ArrayList<>();
-			        for(int j=1;j<=5;j++){
-			            Map<String,Object> priceMap=new HashMap<>();
-			            priceMap.put("MDUpdateAction",'1');
-			            priceMap.put("EntryType",'0');
-			            priceMap.put("EntryPx",Double.valueOf(j+0.1));
-			            priceMap.put("PriceType",Integer.valueOf(j));
-			            priceMap.put("Currency","CNY");
-			            ml.add(priceMap);
-			        }
-			        for (Map<String,Object> m : ml) {
-			            datas.setField(new MDEntryType((char)m.get("EntryType")));
-			            datas.setField(new MDEntryPx((Double)m.get("EntryPx")));
-                        datas.setField(new PriceType((Integer) m.get("PriceType")));
-			            datas.setField(new Currency((String) m.get("Currency")));
-			            mdsf.addGroup(datas);
-			        }
-			        mdsf.setField(new MDEntryType('2'));
-			        list.add(mdsf);
-			    }
-                Flux.interval(Duration.ofSeconds(1)).flatMap(e-> Flux.fromStream(list.stream())).flatMap(i->fixSession.send(()->i)).subscribe();
-			}else if(SubscriptionRequestType.equals('1')){
-			    String[] symbols=new String[]{"USD/CNY","GMD/CNY","GRD/CNY"};
-			    List<MarketDataIncrementalRefresh> list=new ArrayList<>();
+            if(SubscriptionRequestType.equals('0')){
+                for(String s:symbols){
+                    MarketDataSnapshotFullRefresh mdsf=new MarketDataSnapshotFullRefresh();
+                    MarketDataSnapshotFullRefresh.NoMDEntries datas=new MarketDataSnapshotFullRefresh.NoMDEntries();
+                    mdsf.setField(new MDReqID(MDReqID));
+                    List<Map<String,Object>> ml=new ArrayList<>();
+                    for(int j=1;j<2;j++){
+                        Map<String,Object> priceMap=new HashMap<>();
+                        priceMap.put("EntryPx",Double.valueOf(j+0.1));
+                        priceMap.put("MinQty",Double.valueOf(j+0.1));
+                        priceMap.put("Currency",s.split("[/]")[0]);
+                        ml.add(priceMap);
+                    }
+                    for (Map<String,Object> m : ml) {
+                        datas.setField(new Symbol(s));
+                        datas.setField(new MDUpdateAction('1'));
+                        datas.setField(new MDEntryPx((Double)m.get("EntryPx")));
+                        datas.setField(new Currency((String) m.get("Currency")));
+                        datas.setField(new MinQty((Double) m.get("MinQty")));
+                        datas.setField(new ExpireDate(sdf.format(new Date())));
+                        mdsf.addGroup(datas);
+                    }
+                    list.add(mdsf);
+                    mdsf=null;
+                }
+                Flux.just(list).flatMap(e-> Flux.fromStream(list.stream())).flatMap(i->fixSession.send(()->i)).subscribe();
+            }else if(SubscriptionRequestType.equals('1')){
 			    for(String s:symbols){
 			        MarketDataIncrementalRefresh mdir=new MarketDataIncrementalRefresh();
 			        MarketDataIncrementalRefresh.NoMDEntries datas=new MarketDataIncrementalRefresh.NoMDEntries();
 			        mdir.setField(new MDReqID(MDReqID));
-			        mdir.setField(new MDBookType(1));
-			        mdir.setField(new TradeDate(sdf.format(new Date())));
 			        List<Map<String,Object>> ml=new ArrayList<>();
-			        for(int j=1;j<=5;j++){
-			            Map<String,Object> priceMap=new HashMap<>();
-                        priceMap.put("MDUpdateAction",'1');
-			            priceMap.put("EntryType",'0');
-			            priceMap.put("EntryPx",Double.valueOf(j+0.1));
-			            priceMap.put("PriceType",Integer.valueOf(j));
-			            priceMap.put("Currency","CNY");
-			            ml.add(priceMap);
-			        }
-			        for (Map<String,Object> m : ml) {
-                        datas.setField(new MDUpdateAction((char)m.get("MDUpdateAction")));
-                        datas.setField(new MDEntryType((char)m.get("EntryType")));
+                    for(int j=1;j<2;j++){
+                        Map<String,Object> priceMap=new HashMap<>();
+                        priceMap.put("EntryPx",Double.valueOf(j+0.1));
+                        priceMap.put("MinQty",Double.valueOf(j+0.1));
+                        priceMap.put("Currency",s.split("[/]")[0]);
+                        ml.add(priceMap);
+                    }
+                    for (Map<String,Object> m : ml) {
+                        datas.setField(new Symbol(s));
+                        datas.setField(new MDUpdateAction('1'));
                         datas.setField(new MDEntryPx((Double)m.get("EntryPx")));
-                        datas.setField(new PriceType((Integer) m.get("PriceType")));
                         datas.setField(new Currency((String) m.get("Currency")));
+                        datas.setField(new MinQty((Double) m.get("MinQty")));
+                        datas.setField(new ExpireDate(sdf.format(new Date())));
                         mdir.addGroup(datas);
-			        }
-			        list.add(mdir);
+                    }
+			        list_.add(mdir);
+                    mdir=null;
 			    }
-                Flux.interval(Duration.ofSeconds(1)).flatMap(e-> Flux.fromStream(list.stream())).flatMap(i->fixSession.send(()->i)).subscribe();
-			}
+                Flux.interval(Duration.ofSeconds(1)).flatMap(e-> Flux.fromStream(list_.stream())).flatMap(i->fixSession.send(()->i)).subscribe();
+			}else if(SubscriptionRequestType.equals('2')){
+                MarketDataRequestReject mdrr=new MarketDataRequestReject();
+                mdrr.setField(new MDReqID(MDReqID));
+                mdrr.setField(new MDReqRejReason('1'));
+                fixSession.send(()->mdrr).subscribe();
+            }
 		} catch (Exception e) {
 			e.printStackTrace();
 		}
