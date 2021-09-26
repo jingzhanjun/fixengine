@@ -1,4 +1,4 @@
-package com.pactera.tools;
+package com.pactera.common.utils;
 
 import com.pactera.exception.QuickFixJException;
 import quickfix.*;
